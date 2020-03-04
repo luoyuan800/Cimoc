@@ -4,7 +4,10 @@ package com.hiroshi.cimoc.source;
 
 import android.util.Pair;
 
+import com.alibaba.fastjson.JSON;
+import com.google.common.collect.Lists;
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.google.gson.annotations.SerializedName;
 import com.hiroshi.cimoc.App;
 import com.hiroshi.cimoc.core.Manga;
@@ -30,6 +33,7 @@ import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 
 import okhttp3.Headers;
 import okhttp3.Request;
@@ -55,45 +59,24 @@ public class Manhuatai extends MangaParser {
 
     @Override
     public Request getSearchRequest(String keyword, int page) throws UnsupportedEncodingException {
-        String url = StringUtils.format(baseUrl + "/getjson.shtml?d=1516243591359&q=%s",
+        String url = StringUtils.format(baseUrl + "/api/getsortlist/?product_id=2&productname=mht&platformname=wap&orderby=click&search_key=%s&page=%d&size=48",
                 URLEncoder.encode(keyword, "UTF-8"), page);
 
-        // 解决重复加载列表问题
-        //
-        // 思路：在新的一次请求（上拉加载）前检查新Url与上一次请求的是否一致。
-        // 一致则返回空请求，达到阻断请求的目的；不一致则更新Map中存的Url，Map中不存在则新建
-        if (url.equals(ResultActivity.searchUrls.get(TYPE))) {
-            return null;
-        } else {
-            if (ResultActivity.searchUrls.get(TYPE) == null) {
-                ResultActivity.searchUrls.append(TYPE, url);
-            } else {
-                ResultActivity.searchUrls.setValueAt(TYPE, url);
-            }
-        }
         return new Request.Builder().url(url).build();
     }
 
     @Override
     public SearchIterator getSearchIterator(String html, int page) throws JSONException {
-        JSONArray mangaDetailArray = new JSONArray(html);
-        return new JsonIterator(mangaDetailArray) {
+        JSONObject object = new JSONObject(html);
+
+        return new JsonIterator(object.getJSONObject("data").getJSONArray("data")) {
             @Override
             protected Comic parse(JSONObject object) throws JSONException {
-                String title = object.getString("cartoon_name");
-                String cid = object.getString("cartoon_id");
-                String cover = null;
+                String title = object.getString("comic_name");
+                String cid = object.getString("comic_newid");
+                String cover = "https://image.yqmh.com/mh/" + object.getString("comic_id") + ".jpg-300x400.webp";
                 String author = null;
-                String update = object.getString("latest_cartoon_topic_name");
-                try {
-                    Node node = getComicNode(cid);
-//                    cover = node.src("#offlinebtn-container > img");//搜索页解析封面,已失效
-                    cover = node.dataUrl("#offlinebtn-container > img");//搜索页解析封面
-                    author = node.text("div.jshtml > ul > li:nth-child(3)").substring(3);
-                    update = node.text("div.jshtml > ul > li:nth-child(5)").substring(3);
-                } catch (Manga.NetworkErrorException e) {
-                    e.printStackTrace();
-                }
+                String update = null;
                 return new Comic(TYPE, cid, title, cover, update, author);
             }
         };
@@ -140,60 +123,70 @@ public class Manhuatai extends MangaParser {
     @Override
     public void parseInfo(String html, Comic comic) throws UnsupportedEncodingException {
         Node body = new Node(html);
-        String title = body.text("div.jshtml > ul > li:nth-child(1)").substring(3);
+        String title = body.attr("h1#detail-title", "title");
 //        String cover = body.src("#offlinebtn-container > img");//封面链接已改到style属性里了
-        String cover = body.dataUrl("#offlinebtn-container > img");
+        String cover = body.attr("div.detail-cover > img", "data-src");
+        cover = "https:" + cover;
 //        Log.i("Cover", cover);
-        String update = body.text("div.jshtml > ul > li:nth-child(5)").substring(3);
-        String author = body.text("div.jshtml > ul > li:nth-child(3)").substring(3);
-        String intro = body.text("div.wz.clearfix > div");
-        boolean status = isFinish(body.text("div.jshtml > ul > li:nth-child(2)").substring(3));
-        comic.setInfo(title, cover, update, intro, author, status);
+        String update = body.text("span.update").substring(0,10);
+        String author = null;
+        String intro = body.text("div#js_comciDesc > p.desc-content");
+//        boolean status = isFinish(body.text("div.jshtml > ul > li:nth-child(2)").substring(3));
+        comic.setInfo(title, cover, update, intro, author, false);
     }
 
     @Override
     public List<Chapter> parseChapter(String html) {
         List<Chapter> list = new LinkedList<>();
-        for (Node node : new Node(html).list("div.mhlistbody > ul > li > a")) {
-            String title = node.attr("title");
+        for (Node node : new Node(html).list("ol#j_chapter_list > li > a")) {
+            String title = node.attr( "title");
 //            String path = node.hrefWithSplit(0);//于2018.3失效
-            String path = node.href();
+            String path = node.hrefWithSplit(1);
 //            Log.i("Path", path);
             list.add(new Chapter(title, path));
         }
-        return list;
+        return Lists.reverse(list);
     }
+
+    private String _path = null;
 
     //获取漫画图片Request
     @Override
     public Request getImagesRequest(String cid, String path) {
-//        String url = StringUtils.format("http://m.manhuatai.com/%s/%s.html", cid, path);//于2018.3失效
-        String url = StringUtils.format("https://m.manhuatai.com%s", path);
+        _path = path;
+        String url = StringUtils.format("https://m.manhuatai.com/api/getcomicinfo_body?product_id=2&productname=mht&platformname=wap&comic_newid=%s", cid);
         return new Request.Builder().url(url).build();
     }
 
-
     @Override
-    public List<ImageUrl> parseImages(String html) {
+    public List<ImageUrl> parseImages(String html)  {
         List<ImageUrl> list = new LinkedList<>();
-        MDocument document = new MDocument(html);
-        String elScriptList = document.text("#comiclist > script:nth-child(2)");
-        String str = StringUtils.match("<script>var mh_info=(\\{[^}]*\\}).*", elScriptList, 1);
-        Gson gson = new Gson();
-        MhInfo mh_info = gson.fromJson(str, MhInfo.class);
-        int offset = mh_info.imgpath.charAt(1) - '%';
-        ArrayList<Character> list1 = new ArrayList<Character>();
-        for (int i = 0; i < mh_info.imgpath.length(); i++) {
-            list1.add((char) (mh_info.imgpath.charAt(i) - offset));
+        try {
+            JSONObject object = new JSONObject(html);
+            if (object.getInt("status") != 0) {
+                return list;
+            }
+
+            JSONArray chapters = object.getJSONObject("data").getJSONArray("comic_chapter");
+            JSONObject chapter = null;
+            for (int i = 0; i < chapters.length(); i++) {
+                chapter = chapters.getJSONObject(i);
+                String a = chapter.getString("chapter_id");
+                if(a.equals(_path)) {
+                    break;
+                }
+            }
+
+            String ImagePattern = "http://mhpic." + chapter.getString("chapter_domain") + chapter.getString("rule") + "-mht.low.webp";
+
+            for (int index = chapter.getInt("start_num"); index <= chapter.getInt("end_num"); index++) {
+                String image = ImagePattern.replaceFirst("\\$\\$", Integer.toString(index));
+                list.add(new ImageUrl(index, image, false));
+            }
+        } catch (JSONException ex) {
+            // ignore
         }
-        String imgpath = org.apache.commons.lang3.StringUtils.join(list1, ",").replaceAll(",", "");
-        String b = mh_info.comic_size;
-        String c = "mhpic." + mh_info.domain;
-        for (int i = 0; i < mh_info.totalimg; i++) {
-            String d = (mh_info.startimg + i) + ".jpg" + b;
-            String e = "https://" + c + "/comic/" + imgpath + d;
-            list.add(new ImageUrl(i + 1, e, false));
-        }
+
         return list;
     }
 
